@@ -1,6 +1,6 @@
 # AgentForge
 
-Build AI agents from your documents. Spec: `~/Projects/claude-work/ai_agent_platform_spec.md`.
+Build AI agents from your documents. Spec: [`docs/ai_agent_platform_spec.md`](docs/ai_agent_platform_spec.md).
 
 ## Status
 
