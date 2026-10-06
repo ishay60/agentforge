@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    ports: ["8000:8000"]
+    env_file: .env
+    volumes:
+      - ./backend/data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/agents')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+# ponytail: no postgres/redis. Backend uses sqlite + in-process state (agents,
+# conversations, checkpointer, rate limiter). Add postgres when the checkpointer
+# moves off MemorySaver / state must survive restarts across replicas; add redis
+# when running >1 backend replica (rate limiter + cache).
