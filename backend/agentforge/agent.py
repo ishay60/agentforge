@@ -4,10 +4,14 @@ Conversation memory = LangGraph checkpointer keyed by thread_id (conversation id
 Retrieved context is injected transiently in `generate`, never persisted into messages.
 """
 
+import asyncio
+import os
+from pathlib import Path
 from typing import Annotated, TypedDict
 
+import aiosqlite
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -15,8 +19,26 @@ from langgraph.prebuilt import ToolNode
 from agentforge.llm import calculate_cost, invoke_with_failover
 
 MAX_TOOL_ROUNDS = 8
-# ponytail: in-memory checkpointer, lost on restart. Swap for PostgresSaver when persistence matters.
-CHECKPOINTER = MemorySaver()
+# ponytail: sqlite checkpointer (one file, one process). Swap for AsyncPostgresSaver with multiple workers.
+# Async saver is mandatory: SqliteSaver raises NotImplementedError on the async graph API.
+CHECKPOINT_DB = os.environ.get("AGENTFORGE_CHECKPOINT_DB", "data/checkpoints.db")
+_saver: AsyncSqliteSaver | None = None
+
+
+async def _bind_checkpointer(graph):
+    """AsyncSqliteSaver must be built inside a running loop, so build_graph stays sync and the saver is
+    attached per call. Tests spin a loop per request: the aiosqlite connection is loop-agnostic, only the
+    saver's Lock/loop need rebinding (uvicorn has exactly one loop, so this is a no-op there)."""
+    global _saver
+    if _saver is None:
+        Path(CHECKPOINT_DB).parent.mkdir(parents=True, exist_ok=True)
+        conn = aiosqlite.connect(CHECKPOINT_DB)
+        conn._thread.daemon = True  # otherwise the worker thread blocks interpreter exit
+        _saver = AsyncSqliteSaver(await conn)
+        await _saver.setup()
+    elif _saver.loop is not asyncio.get_running_loop():
+        _saver.loop, _saver.lock = asyncio.get_running_loop(), asyncio.Lock()
+    graph.checkpointer = _saver
 
 
 class State(TypedDict, total=False):
@@ -87,11 +109,12 @@ def build_graph(cfg: dict, retriever, tools: list):
     else:
         g.add_edge("generate", "finalize")
     g.add_edge("finalize", END)
-    return g.compile(checkpointer=CHECKPOINTER)
+    return g.compile(checkpointer=True)  # real saver attached in _bind_checkpointer
 
 
 async def chat(graph, conversation_id: str, message: str):
     """Yield SSE-shaped (event, data) tuples for one user turn."""
+    await _bind_checkpointer(graph)
     config = {"configurable": {"thread_id": conversation_id}}
     streamed = False
     async for ev in graph.astream_events({"messages": [HumanMessage(content=message)]}, config, version="v2"):
@@ -118,9 +141,10 @@ async def chat(graph, conversation_id: str, message: str):
     yield "done", {k: s.get(k, 0) for k in ("input_tokens", "output_tokens", "cost_usd")} | {"model": s.get("model_used")}
 
 
-def history(graph, conversation_id: str) -> list[dict]:
+async def history(graph, conversation_id: str) -> list[dict]:
     """Messages for a conversation from the checkpointer, in API shape."""
-    state = graph.get_state({"configurable": {"thread_id": conversation_id}})
+    await _bind_checkpointer(graph)
+    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     out = []
     for m in state.values.get("messages", []):
         role = {"human": "user", "ai": "assistant", "tool": "tool"}.get(m.type, m.type)

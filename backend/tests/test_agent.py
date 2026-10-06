@@ -8,7 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
-from agentforge import api, llm, retriever
+from agentforge import agent, api, db, llm, retriever
 from agentforge.tools import calculate
 
 BOUND: list[str] = []  # tool names the fake saw on bind_tools
@@ -51,6 +51,11 @@ def test_calculate_is_arithmetic_only():
 def test_agent_loop_and_api(tmp_path, monkeypatch):
     monkeypatch.setattr(retriever, "INDEX_ROOT", tmp_path / "idx")
     monkeypatch.setattr(api, "UPLOAD_DIR", tmp_path / "up")
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "af.db"))
+    monkeypatch.setattr(db, "_conn", None)
+    monkeypatch.setattr(agent, "CHECKPOINT_DB", str(tmp_path / "cp.db"))
+    monkeypatch.setattr(agent, "_saver", None)
+    api._graphs.clear()
     fake = FakeLLM(script=[
         _ai(tool_calls=[{"name": "calculate", "args": {"expression": "6 * 7"}, "id": "c1"},
                         {"name": "calculate", "args": {"expression": "1 /"}, "id": "c2"}]),  # 2nd one errors
@@ -92,6 +97,18 @@ def test_agent_loop_and_api(tmp_path, monkeypatch):
     assert msgs[-1]["content"] == "Follow-up answered with memory."
     convs = c.get(f"/api/v1/agents/{aid}/conversations").json()["conversations"]
     assert convs[0]["id"] == cid and convs[0]["message_count"] == 4
+
+    # persisted copies: messages table + usage_log -> analytics (per-turn deltas, not cumulative)
+    rows = db.list_messages(cid)
+    assert [m["role"] for m in rows] == ["user", "assistant", "user", "assistant"]
+    assert rows[1]["content"].startswith("The answer is 42") and rows[3]["content"] == "Follow-up answered with memory."
+    a = c.get(f"/api/v1/agents/{aid}/analytics?period=7d").json()
+    assert a["period"] == "7d" and set(a) == {"period", "summary", "daily", "model_breakdown"}
+    assert a["summary"]["total_conversations"] == 1 and a["summary"]["total_messages"] == 4
+    assert a["summary"]["total_cost_usd"] == pytest.approx(datas[-1]["cost_usd"] * 1.5, rel=1e-3)  # 200+100 in, 20+10 out
+    assert a["summary"]["avg_cost_per_conversation"] == a["summary"]["total_cost_usd"]
+    assert a["daily"][0]["messages"] == 4 and a["model_breakdown"][0]["calls"] == 2
+    assert c.get(f"/api/v1/agents/{aid}/analytics?period=1d").status_code == 422
 
     # all providers down -> graceful assistant message, not a 500
     monkeypatch.setattr(llm, "get_llm", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
