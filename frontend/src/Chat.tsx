@@ -17,7 +17,7 @@ export default function Chat({ agentId }: { agentId: string }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
-  useEffect(() => bottom.current?.scrollIntoView({ behavior: 'smooth' }), [msgs])
+  useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
 
   const patchLast = (f: (m: Msg) => Msg) => setMsgs((ms) => [...ms.slice(0, -1), f(ms[ms.length - 1])])
 
