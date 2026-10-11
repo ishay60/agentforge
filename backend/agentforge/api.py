@@ -7,6 +7,7 @@ Swap the rate limiter for Redis INCR and sqlite for Postgres before running >1 w
 import json
 import logging
 import shutil
+import threading
 import time
 import uuid
 from collections import defaultdict, deque
@@ -32,6 +33,7 @@ UPLOAD_DIR = Path("data/uploads")
 
 _graphs: dict[str, object] = {}    # id -> compiled graph (rebuilt when docs/tools change)
 _retrievers: dict[str, HybridRetriever] = {}
+_index_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)  # one writer per agent index
 
 
 # --- logging: one JSON line per record --------------------------------------------
@@ -153,15 +155,18 @@ def _index(aid: str, source: str, filename: str, source_type: str, size: int) ->
         raise HTTPException(422 if source_type == "upload" else 502, f"could not ingest: {e}") from e
     if not chunks:
         raise HTTPException(422, "document has no extractable text")
-    if db.has_document_hash(aid, h):
-        raise HTTPException(409, "identical document already indexed")
-    r = _retriever(aid)
-    r.add(chunks)
-    r.save(aid)
+    # ponytail: process-wide lock per agent. Concurrent uploads to one agent would interleave
+    # FAISS adds with the BM25 rebuild; the queue version of ingestion makes this a single worker.
+    with _index_locks[aid]:
+        if db.has_document_hash(aid, h):
+            raise HTTPException(409, "identical document already indexed")
+        r = _retriever(aid)
+        r.add(chunks)
+        r.save(aid)
+        doc = {"id": str(uuid.uuid4()), "filename": filename, "source_type": source_type, "status": "ready",
+               "chunk_count": len(chunks), "file_size_bytes": size, "content_hash": h, "processed_at": db.now()}
+        db.insert_document(aid, doc)
     _graphs.pop(aid, None)  # tool list depends on index being non-empty
-    doc = {"id": str(uuid.uuid4()), "filename": filename, "source_type": source_type, "status": "ready",
-           "chunk_count": len(chunks), "file_size_bytes": size, "content_hash": h, "processed_at": db.now()}
-    db.insert_document(aid, doc)
     return doc
 
 

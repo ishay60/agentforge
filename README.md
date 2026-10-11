@@ -72,11 +72,13 @@ uv run python -m agentforge.cli chat demo
 |---|---|---|
 | POST | `/agents` | name, system_prompt, llm_provider, llm_model, temperature, top_k, hybrid_alpha |
 | GET | `/agents` | counts and total cost per agent |
+| GET, DELETE | `/agents/{id}` | config; delete removes index and uploads too |
 | POST | `/agents/{id}/documents` | multipart `file` or JSON `{"url": …}`; 409 on duplicate content |
 | GET | `/agents/{id}/documents` | |
 | POST | `/agents/{id}/tools` | HTTP tool: name, description, http_url, http_method, parameters_schema |
 | POST | `/agents/{id}/tools/mcp` | `{"target": "http://host/mcp"}` or `{"target": "node server.js serve"}` |
 | GET | `/agents/{id}/tools` | |
+| PATCH, DELETE | `/agents/{id}/tools/{tid}` | `{"is_enabled": false}` drops it from the agent's tool set |
 | POST | `/agents/{id}/chat` | SSE stream; pass `conversation_id` to continue a thread |
 | GET | `/agents/{id}/conversations` | |
 | GET | `/agents/{id}/conversations/{cid}/messages` | full thread including tool messages |
@@ -133,7 +135,9 @@ frontend/src/    Agents, Agent (documents, tools, analytics, conversations), Cha
 | `tests/test_pipeline.py` | ingestion of txt, html, pdf; hybrid search; persistence | 1 end-to-end |
 | `tests/test_tools.py` | MCP discovery and calls over stdio, HTTP tool, registry | 3 |
 | `tests/test_agent.py` | full agent loop through the API with a scripted LLM: retrieval, parallel tool calls, tool error recovery, memory, provider outage, persistence, analytics, rate limiting | 3 |
+| `tests/test_api_edges.py` | empty, oversized, unreadable uploads; bad URLs; tool toggle and delete; agent delete; concurrent uploads | 3 |
 | `tests/eval/` | RAG accuracy, tool selection, refusal, multi-step | 19 |
+| `frontend/src/api.test.ts` | SSE frame parser, chunk boundaries, error responses | 4 |
 
 All run in CI with no API key.
 

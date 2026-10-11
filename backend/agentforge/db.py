@@ -7,11 +7,13 @@ ponytail: sqlite file, not Postgres. Upgrade path: swap `connect()` for psycopg 
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = os.environ.get("AGENTFORGE_DB", "data/agentforge.db")
 _conn: sqlite3.Connection | None = None
+_lock = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -45,8 +47,9 @@ def now() -> str:
 def connect() -> sqlite3.Connection:
     """One autocommit connection, schema applied on first use.
 
-    ponytail: shared across FastAPI's threadpool via check_same_thread=False; Python's sqlite3 serializes
-    calls. Move to a per-request connection (or Postgres pool) if write contention ever shows up.
+    ponytail: one connection shared across FastAPI's threadpool, every statement under one lock
+    (sqlite3 raises "API misuse" when two threads hit the same connection). Move to a per-request
+    connection or a Postgres pool if write contention ever shows up.
     """
     global _conn
     if _conn is None:
@@ -57,8 +60,13 @@ def connect() -> sqlite3.Connection:
     return _conn
 
 
+def execute(sql: str, params: tuple = ()) -> sqlite3.Cursor:
+    with _lock:
+        return connect().execute(sql, params)
+
+
 def q(sql: str, *params) -> list[dict]:
-    return [dict(r) for r in connect().execute(sql, params).fetchall()]
+    return [dict(r) for r in execute(sql, params).fetchall()]
 
 
 def one(sql: str, *params) -> dict | None:
@@ -69,7 +77,7 @@ def one(sql: str, *params) -> dict | None:
 # --- agents ---------------------------------------------------------------------
 
 def insert_agent(aid: str, cfg: dict) -> dict:
-    connect().execute("INSERT INTO agents VALUES (?,?,?,?)", (aid, cfg["name"], json.dumps(cfg), now()))
+    execute("INSERT INTO agents VALUES (?,?,?,?)", (aid, cfg["name"], json.dumps(cfg), now()))
     return get_agent(aid)
 
 
@@ -98,7 +106,7 @@ DOC_COLS = ("id", "filename", "source_type", "status", "chunk_count", "file_size
 
 
 def insert_document(aid: str, doc: dict) -> None:
-    connect().execute("INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?)",
+    execute("INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?)",
                       (doc["id"], aid, *(doc[k] for k in DOC_COLS[1:])))
 
 
@@ -111,7 +119,7 @@ def has_document_hash(aid: str, h: str) -> bool:
 
 
 def insert_tool(aid: str, cfg: dict) -> None:
-    connect().execute("INSERT INTO tools VALUES (?,?,?,?,?)",
+    execute("INSERT INTO tools VALUES (?,?,?,?,?)",
                       (cfg["id"], aid, cfg["name"], cfg["tool_type"], json.dumps(cfg)))
 
 
@@ -124,20 +132,19 @@ def set_tool_enabled(aid: str, tid: str, enabled: bool) -> dict | None:
     if r is None:
         return None
     cfg = {**json.loads(r["cfg"]), "is_enabled": enabled}
-    connect().execute("UPDATE tools SET cfg=? WHERE id=?", (json.dumps(cfg), tid))
+    execute("UPDATE tools SET cfg=? WHERE id=?", (json.dumps(cfg), tid))
     return cfg
 
 
 def delete_tool(aid: str, tid: str) -> bool:
-    return connect().execute("DELETE FROM tools WHERE id=? AND agent_id=?", (tid, aid)).rowcount > 0
+    return execute("DELETE FROM tools WHERE id=? AND agent_id=?", (tid, aid)).rowcount > 0
 
 
 def delete_agent(aid: str) -> None:
-    c = connect()
-    c.execute("DELETE FROM usage_log WHERE agent_id=?", (aid,))
-    c.execute("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE agent_id=?)", (aid,))
+    execute("DELETE FROM usage_log WHERE agent_id=?", (aid,))
+    execute("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE agent_id=?)", (aid,))
     for t in ("conversations", "tools", "documents", "agents"):
-        c.execute(f"DELETE FROM {t} WHERE {'id' if t == 'agents' else 'agent_id'}=?", (aid,))
+        execute(f"DELETE FROM {t} WHERE {'id' if t == 'agents' else 'agent_id'}=?", (aid,))
 
 
 # --- conversations / messages / usage ----------------------------------------------
@@ -146,7 +153,7 @@ CONV_COLS = "id, title, message_count, total_cost_usd, created_at, updated_at"
 
 
 def get_or_create_conversation(aid: str, cid: str, title: str) -> dict:
-    connect().execute("INSERT OR IGNORE INTO conversations (id, agent_id, title, created_at, updated_at) "
+    execute("INSERT OR IGNORE INTO conversations (id, agent_id, title, created_at, updated_at) "
                       "VALUES (?,?,?,?,?)", (cid, aid, title, now(), now()))
     return one("SELECT * FROM conversations WHERE id=?", cid)
 
@@ -164,15 +171,14 @@ def record_turn(aid: str, cid: str, user_msg: str, assistant_msg: str, model: st
     """Persist one finished chat turn. Token/cost args are per-turn deltas."""
     import uuid
     ts = now()
-    c = connect()
-    c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
+    execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
               (str(uuid.uuid4()), cid, "user", user_msg, None, None, None, ts))
-    c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
+    execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
               (str(uuid.uuid4()), cid, "assistant", assistant_msg, model, cost_usd, latency_ms, ts))
-    c.execute("INSERT INTO usage_log (agent_id, conversation_id, model, input_tokens, output_tokens, cost_usd, "
+    execute("INSERT INTO usage_log (agent_id, conversation_id, model, input_tokens, output_tokens, cost_usd, "
               "latency_ms, created_at) VALUES (?,?,?,?,?,?,?,?)",
               (aid, cid, model, input_tokens, output_tokens, cost_usd, latency_ms, ts))
-    c.execute("UPDATE conversations SET message_count=message_count+2, total_input_tokens=total_input_tokens+?, "
+    execute("UPDATE conversations SET message_count=message_count+2, total_input_tokens=total_input_tokens+?, "
               "total_output_tokens=total_output_tokens+?, total_cost_usd=ROUND(total_cost_usd+?,6), updated_at=? "
               "WHERE id=?", (input_tokens, output_tokens, cost_usd, ts, cid))
 

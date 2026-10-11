@@ -1,6 +1,7 @@
 """Edge cases and management endpoints: empty/oversized/bad uploads, tool toggle, agent delete."""
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -66,3 +67,16 @@ def test_tool_toggle_and_agent_delete(client):
     assert client.get(f"/api/v1/agents/{aid}").status_code == 404
     assert not (retriever.INDEX_ROOT / aid).exists() and not (api.UPLOAD_DIR / aid).exists()
     assert client.get("/api/v1/agents").json()["total"] == 0
+
+
+def test_concurrent_uploads_same_agent(client):
+    aid = client.post("/api/v1/agents", json={"name": "c"}).json()["id"]
+    up = lambda i: client.post(f"/api/v1/agents/{aid}/documents",  # noqa: E731
+                               files={"file": (f"d{i}.txt", (f"document number {i} about topic {i}. " * 10).encode(), "text/plain")})
+    with ThreadPoolExecutor(8) as ex:
+        codes = [r.status_code for r in ex.map(up, range(8))]
+    assert codes == [201] * 8
+    docs = client.get(f"/api/v1/agents/{aid}/documents").json()["documents"]
+    assert len(docs) == 8
+    assert len(api._retriever(aid).chunks) == sum(d["chunk_count"] for d in docs)
+    assert len(retriever.HybridRetriever.load(aid).chunks) == len(api._retriever(aid).chunks)  # on-disk matches
