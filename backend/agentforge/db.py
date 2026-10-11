@@ -60,13 +60,17 @@ def connect() -> sqlite3.Connection:
     return _conn
 
 
-def execute(sql: str, params: tuple = ()) -> sqlite3.Cursor:
+def execute(sql: str, params: tuple = ()) -> int:
+    """Write statement; returns rowcount. Executes and finishes under the lock."""
     with _lock:
-        return connect().execute(sql, params)
+        return connect().execute(sql, params).rowcount
 
 
 def q(sql: str, *params) -> list[dict]:
-    return [dict(r) for r in execute(sql, params).fetchall()]
+    """Read statement; rows are fetched under the lock, since a cursor from a shared
+    connection is invalidated by the next statement from any thread."""
+    with _lock:
+        return [dict(r) for r in connect().execute(sql, params).fetchall()]
 
 
 def one(sql: str, *params) -> dict | None:
@@ -137,7 +141,7 @@ def set_tool_enabled(aid: str, tid: str, enabled: bool) -> dict | None:
 
 
 def delete_tool(aid: str, tid: str) -> bool:
-    return execute("DELETE FROM tools WHERE id=? AND agent_id=?", (tid, aid)).rowcount > 0
+    return execute("DELETE FROM tools WHERE id=? AND agent_id=?", (tid, aid)) > 0
 
 
 def delete_agent(aid: str) -> None:
