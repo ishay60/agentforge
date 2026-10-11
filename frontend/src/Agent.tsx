@@ -101,6 +101,8 @@ function Tools({ id }: { id: string }) {
     mutationFn: (t: string) => api<{ mcp_server_id: string; tools_discovered: { name: string; description: string }[] }>(`/agents/${id}/tools/mcp`, json({ target: t })),
     onSuccess: done,
   })
+  const toggle = useMutation({ mutationFn: (t: Tool) => api(`/agents/${id}/tools/${t.id}`, json({ is_enabled: !t.is_enabled }, 'PATCH')), onSuccess: done })
+  const remove = useMutation({ mutationFn: (t: Tool) => api(`/agents/${id}/tools/${t.id}`, { method: 'DELETE' }), onSuccess: done })
   const submitHttp = () => {
     let parameters_schema: unknown
     try { parameters_schema = JSON.parse(http.parameters_schema); setSchemaErr(null) } catch (e) { setSchemaErr((e as Error).message); return }
@@ -114,10 +116,14 @@ function Tools({ id }: { id: string }) {
         <Status q={tools} />
         {tools.data?.tools.length === 0 && <p className="text-sm text-gray-500">No tools yet (built-ins are always available).</p>}
         {tools.data?.tools.map((t) => (
-          <div key={t.id} className="card !p-3 text-sm">
+          <div key={t.id} className={`card !p-3 text-sm ${t.is_enabled ? '' : 'opacity-60'}`}>
             <div className="flex items-center gap-2"><span className="font-medium">{t.name}</span>
               <span className="rounded bg-gray-100 px-1.5 text-xs">{t.tool_type}</span>
-              {!t.is_enabled && <span className="text-xs text-gray-400">disabled</span>}</div>
+              {!t.is_enabled && <span className="text-xs text-gray-400">disabled</span>}
+              <span className="ml-auto flex gap-1">
+                <button type="button" className="btn-secondary !py-0.5 text-xs" onClick={() => toggle.mutate(t)} disabled={toggle.isPending}>{t.is_enabled ? 'Disable' : 'Enable'}</button>
+                <button type="button" className="btn-secondary !py-0.5 text-xs text-red-600" onClick={() => { if (confirm(`Remove tool ${t.name}?`)) remove.mutate(t) }} disabled={remove.isPending}>Remove</button>
+              </span></div>
             <p className="text-xs text-gray-500">{t.description}</p>
           </div>
         ))}

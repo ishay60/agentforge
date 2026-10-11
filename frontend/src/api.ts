@@ -35,7 +35,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     try { detail = (await res.json()).detail ?? detail } catch { /* not json */ }
     throw new ApiError(res.status, typeof detail === 'string' ? detail : JSON.stringify(detail))
   }
-  return res.json()
+  return res.status === 204 ? (undefined as T) : res.json()
 }
 
 export const json = (body: unknown, method = 'POST'): RequestInit =>
