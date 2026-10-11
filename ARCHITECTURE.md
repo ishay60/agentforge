@@ -45,7 +45,7 @@ Every HTTP and MCP result is wrapped in an `<untrusted-data>` block with an inst
 
 ## Persistence
 
-Stdlib `sqlite3`, plain SQL, one autocommit connection shared across FastAPI's threadpool. Tables mirror the spec's Postgres schema with JSON stored as text. The LangGraph checkpointer is a second sqlite file. The upgrade is `psycopg` plus `AsyncPostgresSaver` behind the same function signatures; nothing above `db.py` changes.
+Stdlib `sqlite3`, plain SQL, one autocommit connection shared across FastAPI's threadpool with every statement, including the row fetch, under one lock. A concurrent-upload test showed why both halves matter: parallel statements on a shared connection raise "API misuse", and a cursor fetched after the lock is released returns nothing once another thread runs a statement. Index writes take a second lock per agent so FAISS adds and the BM25 rebuild never interleave. Tables mirror the spec's Postgres schema with JSON stored as text. The LangGraph checkpointer is a second sqlite file. The upgrade is `psycopg` plus `AsyncPostgresSaver` behind the same function signatures; nothing above `db.py` changes.
 
 Conversation history is served from the checkpointer, not the `messages` table, because the checkpoint includes tool messages in order. The `messages` and `usage_log` tables are the analytics copy and the audit trail.
 
@@ -65,7 +65,7 @@ Each is marked `ponytail:` in the code with its upgrade path.
 
 | Simplification | Ceiling | Upgrade |
 |---|---|---|
-| sqlite, one connection | one process | Postgres, connection pool |
+| sqlite, one locked connection | one process, serialized writes | Postgres, connection pool |
 | in-memory rate limiter | one process | Redis `INCR` with TTL |
 | inline ingestion | large PDFs block the request | background task plus status polling |
 | BM25 rebuilt per add | ~100k chunks | incremental index or a search engine |
