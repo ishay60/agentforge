@@ -6,6 +6,7 @@ Swap the rate limiter for Redis INCR and sqlite for Postgres before running >1 w
 
 import json
 import logging
+import shutil
 import time
 import uuid
 from collections import defaultdict, deque
@@ -67,7 +68,8 @@ def _retriever(agent_id: str) -> HybridRetriever:
 def _graph(agent_id: str):
     if agent_id not in _graphs:
         cfg, r = _agent(agent_id)["cfg"], _retriever(agent_id)
-        _graphs[agent_id] = agent_mod.build_graph(cfg, r, build_tools(r, db.list_tools(agent_id), cfg["top_k"]))
+        tools = [t for t in db.list_tools(agent_id) if t.get("is_enabled", True)]
+        _graphs[agent_id] = agent_mod.build_graph(cfg, r, build_tools(r, tools, cfg["top_k"]))
     return _graphs[agent_id]
 
 
@@ -121,11 +123,36 @@ def list_agents():
     return {"agents": agents, "total": len(agents)}
 
 
+@app.get(f"{API}/agents/{{agent_id}}")
+def get_agent(agent_id: str):
+    cfg = _agent(agent_id)["cfg"]
+    return {**db.agent_summary(agent_id), "cfg": cfg}
+
+
+@app.delete(f"{API}/agents/{{agent_id}}", status_code=204)
+def delete_agent(agent_id: str):
+    """Removes rows, the FAISS index, and uploads. Checkpoints for its conversations stay (orphaned, harmless)."""
+    _agent(agent_id)
+    db.delete_agent(agent_id)
+    _graphs.pop(agent_id, None)
+    _retrievers.pop(agent_id, None)
+    HybridRetriever.delete(agent_id)
+    shutil.rmtree(UPLOAD_DIR / agent_id, ignore_errors=True)
+
+
 # --- documents -----------------------------------------------------------------
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
 
 def _index(aid: str, source: str, filename: str, source_type: str, size: int) -> dict:
     a = _agent(aid)
-    h, chunks = ingest(source, chunk_size=a["cfg"]["chunk_size"])
+    try:
+        h, chunks = ingest(source, chunk_size=a["cfg"]["chunk_size"])
+    except Exception as e:  # noqa: BLE001 - unreadable file, bad URL, network error
+        raise HTTPException(422 if source_type == "upload" else 502, f"could not ingest: {e}") from e
+    if not chunks:
+        raise HTTPException(422, "document has no extractable text")
     if db.has_document_hash(aid, h):
         raise HTTPException(409, "identical document already indexed")
     r = _retriever(aid)
@@ -157,6 +184,8 @@ async def upload_document(agent_id: str, request: Request):
     dest = UPLOAD_DIR / agent_id / Path(file.filename).name
     dest.parent.mkdir(parents=True, exist_ok=True)
     data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"file exceeds {MAX_UPLOAD_BYTES // 1024 // 1024} MB")
     dest.write_bytes(data)
     return _index(agent_id, str(dest), file.filename, "upload", len(data))
 
@@ -205,6 +234,28 @@ async def connect_mcp(agent_id: str, body: McpIn):
                                   "mcp_server_id": sid, "target": body.target, **s})
     _graphs.pop(agent_id, None)
     return {"mcp_server_id": sid, "tools_discovered": [{"name": s["name"], "description": s["description"]} for s in specs]}
+
+
+class ToolPatch(BaseModel):
+    is_enabled: bool
+
+
+@app.patch(f"{API}/agents/{{agent_id}}/tools/{{tool_id}}")
+def patch_tool(agent_id: str, tool_id: str, body: ToolPatch):
+    _agent(agent_id)
+    cfg = db.set_tool_enabled(agent_id, tool_id, body.is_enabled)
+    if cfg is None:
+        raise HTTPException(404, "tool not found")
+    _graphs.pop(agent_id, None)
+    return {k: cfg[k] for k in ("id", "name", "tool_type", "is_enabled")}
+
+
+@app.delete(f"{API}/agents/{{agent_id}}/tools/{{tool_id}}", status_code=204)
+def delete_tool(agent_id: str, tool_id: str):
+    _agent(agent_id)
+    if not db.delete_tool(agent_id, tool_id):
+        raise HTTPException(404, "tool not found")
+    _graphs.pop(agent_id, None)
 
 
 @app.get(f"{API}/agents/{{agent_id}}/tools")

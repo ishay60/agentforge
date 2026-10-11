@@ -4,6 +4,7 @@ One instance per agent. State (encoder, index, corpus) belongs together -> class
 """
 
 import json
+import shutil
 from functools import lru_cache
 from pathlib import Path
 
@@ -69,6 +70,10 @@ class HybridRetriever:
         faiss.write_index(self.index, str(path / "index.faiss"))
         (path / "chunks.json").write_text(json.dumps(self.chunks, ensure_ascii=False))
         return path
+
+    @staticmethod
+    def delete(agent_id: str) -> None:
+        shutil.rmtree(INDEX_ROOT / agent_id, ignore_errors=True)
 
     @classmethod
     def load(cls, agent_id: str) -> "HybridRetriever":

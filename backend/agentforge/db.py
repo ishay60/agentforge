@@ -119,6 +119,27 @@ def list_tools(aid: str) -> list[dict]:
     return [json.loads(r["cfg"]) for r in q("SELECT cfg FROM tools WHERE agent_id=? ORDER BY rowid", aid)]
 
 
+def set_tool_enabled(aid: str, tid: str, enabled: bool) -> dict | None:
+    r = one("SELECT cfg FROM tools WHERE id=? AND agent_id=?", tid, aid)
+    if r is None:
+        return None
+    cfg = {**json.loads(r["cfg"]), "is_enabled": enabled}
+    connect().execute("UPDATE tools SET cfg=? WHERE id=?", (json.dumps(cfg), tid))
+    return cfg
+
+
+def delete_tool(aid: str, tid: str) -> bool:
+    return connect().execute("DELETE FROM tools WHERE id=? AND agent_id=?", (tid, aid)).rowcount > 0
+
+
+def delete_agent(aid: str) -> None:
+    c = connect()
+    c.execute("DELETE FROM usage_log WHERE agent_id=?", (aid,))
+    c.execute("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE agent_id=?)", (aid,))
+    for t in ("conversations", "tools", "documents", "agents"):
+        c.execute(f"DELETE FROM {t} WHERE {'id' if t == 'agents' else 'agent_id'}=?", (aid,))
+
+
 # --- conversations / messages / usage ----------------------------------------------
 
 CONV_COLS = "id, title, message_count, total_cost_usd, created_at, updated_at"
